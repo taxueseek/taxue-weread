@@ -286,8 +286,22 @@ def cmd_search(api: WereadAPI, args):
     result = api.call("/store/search", **params)
 
     if getattr(args, "json", False) is True:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return
+        # 扁平化搜索结果
+        items = []
+        for group in result.get("results", []):
+            for b in group.get("books", []):
+                bi = b.get("bookInfo", {})
+                if bi.get("bookId"):
+                    items.append({
+                        "bookId": bi.get("bookId", ""),
+                        "title": bi.get("title", ""),
+                        "author": bi.get("author", ""),
+                        "newRating": bi.get("newRating"),
+                        "newRatingCount": bi.get("newRatingCount", 0),
+                        "category": bi.get("category", ""),
+                        "readingCount": b.get("readingCount", 0),
+                    })
+        return {"keyword": args.keyword, "total": len(items), "items": items}
 
     results = result.get("results", [])
     if not results:
@@ -348,11 +362,81 @@ def cmd_search(api: WereadAPI, args):
     print_pagination(page, total_pages, has_prev, has_next)
 
 
+# ─── compact field definitions ──────────────────────────────────────
+# 每个命令的 --compact 模式输出字段白名单。None 表示输出全部。
+# 每个命令的 --compact 输出字段定义。
+# 格式：{"顶层字段": ["子字段", ...], ...}。None 表示保留全部子字段。
+_COMPACT_FIELDS = {
+    "search":       {"items": ["bookId", "title", "author", "newRating", "readingCount"]},
+    "shelf":        {"books": ["bookId", "title", "author", "category", "finishReading", "readUpdateTime"]},
+    "book":         {"*": ["title", "author", "translator", "newRating", "category", "wordCount"]},
+    "readdata":     {"*": ["readDays", "totalReadTime", "dayAverageReadTime", "compare", "preferTimeWord", "readRate"]},
+    "review":       {"reviews": ["author", "star", "content"]},
+    "discover":     {"items": ["bookId", "title", "author", "newRating", "reason"]},
+    "bestbookmarks":{"items": ["markText", "totalCount"]},
+    "underlines":   {"underlines": ["range", "count"]},
+    "readreviews":  {"reviews": ["totalCount", "author", "content"]},
+    "resolve":      {"candidates": ["bookId", "title", "author", "matchScore"]},
+    "inspect":      {"*": ["bookId", "title", "author", "rating"], "highlights": ["chapter", "text"], "thoughts": ["chapter", "content"]},
+    "mirror":       {"profile": None, "annotations": ["title", "author", "noteDensity", "totalNotes", "highlights", "thoughts"]},
+    "organize":     {"books": ["title", "author", "highlights", "thoughts"], "summary": None},
+    "export":       {"*": ["title"], "highlights": ["chapter", "text"], "thoughts": ["chapter", "content"]},
+    "author":       {"books": ["title", "rating", "readingCount"]},
+}
+
+
 def _filter_fields(item, fields):
     """按字段白名单过滤 dict。fields=None 返回全部。"""
     if fields is None:
         return item
     return {k: v for k, v in item.items() if k in fields}
+
+
+def _compact_json(data, fields):
+    """递归压缩 JSON 输出。
+    fields 格式：{"key": ["子字段", ...], "*": ["所有key的子字段"], None表示保留全部}
+    """
+    if isinstance(data, dict):
+        result = {}
+        for k, v in data.items():
+            if k not in fields:
+                continue
+            sub_fields = fields[k]
+            if sub_fields is None:
+                # 保留全部
+                result[k] = v
+            elif isinstance(sub_fields, list) and isinstance(v, list):
+                # 列表字段：压缩每个元素
+                result[k] = [_compact_json(item, {s: [] for s in sub_fields}) if isinstance(item, dict) else item for item in v]
+            elif isinstance(sub_fields, list) and isinstance(v, dict):
+                # 单个对象字段
+                result[k] = _compact_json(v, {s: [] for s in sub_fields})
+            else:
+                result[k] = v
+        return result
+    return data
+
+
+def _output(result, args):
+    """统一输出处理：支持 --compact 压缩。"""
+    if result is None:
+        return
+    if not isinstance(result, dict):
+        return
+    compact_fields = _COMPACT_FIELDS.get(args.command)
+    if getattr(args, "compact", False) and compact_fields:
+        result = _compact_json(result, compact_fields)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def _compact_output(data, command, args):
+    """快捷函数：在命令内部调用，自动处理 compact 输出。"""
+    if not isinstance(data, dict):
+        return data
+    compact_fields = _COMPACT_FIELDS.get(command)
+    if getattr(args, "compact", False) and compact_fields:
+        return _compact_json(data, compact_fields)
+    return data
 
 
 def cmd_resolve(api: WereadAPI, args):
@@ -418,7 +502,7 @@ def cmd_resolve(api: WereadAPI, args):
     }
 
     if getattr(args, "json", False):
-        print(json.dumps(output, ensure_ascii=False, indent=2))
+        return output
     else:
         print(f"「{args.keyword}」找到 {len(items)} 本相关书：\n")
         for i, item in enumerate(items, 1):
@@ -541,7 +625,7 @@ def cmd_shelf(api: WereadAPI, args):
             "albums": [_filter_fields(a, field_filter) for a in albums],
             "total": total, "finished": finished,
         }
-        print(json.dumps(filtered, ensure_ascii=False, indent=2))
+        return filtered
         return
 
     # 文本模式
@@ -670,7 +754,7 @@ def cmd_notes(api: WereadAPI, args):
 
         if getattr(args, "json", False) is True:
             output = {"bookmarklist": bm, "reviews": rv}
-            print(json.dumps(output, ensure_ascii=False, indent=2))
+            return output
             return
 
         print("── 划线内容 ──")
@@ -739,7 +823,7 @@ def cmd_notes(api: WereadAPI, args):
                 "totalBookmarkCount": sum(b["bookmarkCount"] for b in all_books),
                 "books": all_books,
             }
-            print(json.dumps(output, ensure_ascii=False, indent=2))
+            return output
             return
 
         if pages_fetched >= max_pages:
@@ -780,7 +864,7 @@ def cmd_readdata(api: WereadAPI, args):
     result = api.call("/readdata/detail", mode=mode, baseTime=base_time)
 
     if getattr(args, "json", False) is True:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
         return
 
     read_days = result.get("readDays", 0)
@@ -854,7 +938,7 @@ def cmd_review(api: WereadAPI, args):
                        count=per_page, maxIdx=0)
 
     if getattr(args, "json", False) is True:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
         return
 
     reviews_cnt = result.get("reviewsCnt", 0)
@@ -895,7 +979,7 @@ def cmd_discover(api: WereadAPI, args):
         result = api.call("/book/recommend", count=getattr(args, "per_page", 10))
 
     if getattr(args, "json", False) is True:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
         return
 
     if book_id:
@@ -1490,7 +1574,7 @@ def cmd_bestbookmarks(api: WereadAPI, args):
     result = api.call("/book/bestbookmarks", bookId=book_id, chapterUid=chapter_uid, synckey=0)
 
     if getattr(args, "json", False) is True:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
         return
 
     items = result.get("items", [])
@@ -1530,7 +1614,7 @@ def cmd_underlines(api: WereadAPI, args):
     result = api.call("/book/underlines", bookId=book_id, chapterUid=chapter_uid, synckey=0)
 
     if getattr(args, "json", False) is True:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
         return
 
     underlines = result.get("underlines", [])
@@ -1569,7 +1653,7 @@ def cmd_readreviews(api: WereadAPI, args):
     result = api.call("/book/readreviews", bookId=book_id, chapterUid=chapter_uid, reviews=reviews_param)
 
     if getattr(args, "json", False) is True:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
         return
 
     rv_list = result.get("reviews", [])
@@ -1614,7 +1698,7 @@ def cmd_api_call(api: WereadAPI, args):
             params[k] = v
     try:
         result = api.call(args.api_name, **params)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
     except WereadError as e:
         print(f"错误: {e}", file=sys.stderr)
         sys.exit(1)
@@ -1839,6 +1923,10 @@ def main():
     p.add_argument("--param", action="append", help="接口参数，格式 key=value，可重复")
     p.set_defaults(func=cmd_api_call)
 
+    # 为每个子命令添加 --compact 参数
+    for _name, _sub in sub.choices.items():
+        _sub.add_argument("--compact", action="store_true", dest="compact", help="压缩 JSON 输出，只保留核心字段")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -1846,7 +1934,8 @@ def main():
 
     api = WereadAPI()
     try:
-        args.func(api, args)
+        result = args.func(api, args)
+        _output(result, args)
     except WereadError as e:
         print(f"错误: {e}", file=sys.stderr)
         sys.exit(1)
