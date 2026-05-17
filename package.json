@@ -1,0 +1,44 @@
+{
+  "name": "taxue-weread",
+  "version": "1.5.0",
+  "description": "微信读书官方 Skill 的 Agent 优化版——CLI + 缓存 + 合并命令 + 压缩输出",
+  "bin": {
+    "taxue-weread": "bin/taxue-weread.js",
+    "twr": "bin/taxue-weread.js"
+  },
+  "files": [
+    "bin",
+    "scripts",
+    "SKILL.md",
+    "references",
+    "README.md",
+    "RELEASE.md"
+  ],
+  "scripts": {
+    "postinstall": "node bin/check-python.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "weread",
+    "wechat-read",
+    "agent",
+    "skill",
+    "cli",
+    "book",
+    "reading",
+    "notes",
+    "highlights"
+  ],
+  "author": "taxueseek",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/taxueseek/taxue-weread.git"
+  },
+  "bugs": {
+    "url": "https://github.com/taxueseek/taxue-weread/issues"
+  },
+  "homepage": "https://github.com/taxueseek/taxue-weread#readme"
+}
