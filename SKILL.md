@@ -23,7 +23,7 @@ version: 1.5.0
 | 推荐/相似书 | `WR discover [--book <bookId>]` | — |
 | 阅读画像 | `WR mirror [--depth quick\|standard\|deep] [--books N]` | `references/mirror-guide.md` |
 | 整理读书笔记/读后感 | `WR organize [--max-books 10] [--max-notes 50]` | `references/organize-guide.md` |
-| 年度报告/可视化 | `WR mirror --depth deep` + `WR readdata --mode annually` | `references/data.md` |
+| 年度报告/可视化 | `WR mirror --depth deep` + `WR readdata --mode annually` | `references/readdata.md` |
 | 导出笔记 | `WR export <bookId>\|--all --output <路径>` | — |
 | 书架分析 | `WR shelf-stats` | — |
 
