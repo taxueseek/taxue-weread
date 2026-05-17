@@ -355,6 +355,77 @@ def _filter_fields(item, fields):
     return {k: v for k, v in item.items() if k in fields}
 
 
+def cmd_resolve(api: WereadAPI, args):
+    """模糊书名 → 精确 bookId。搜索后按匹配度排序，输出候选列表供选择。"""
+    search_result = api.call("/store/search", keyword=args.keyword, scope=args.scope or 0, count=args.count or 10)
+    results = search_result.get("results", [])
+
+    # 扁平化所有候选书
+    candidates = []
+    for group in results:
+        for b in group.get("books", []):
+            bi = b.get("bookInfo", {})
+            if not bi.get("bookId"):
+                continue
+            candidates.append({
+                "bookId": bi.get("bookId", ""),
+                "title": bi.get("title", ""),
+                "author": bi.get("author", ""),
+                "rating": bi.get("newRating", 0),
+                "ratingCount": bi.get("newRatingCount", 0),
+                "readingCount": b.get("readingCount", 0),
+                "scope": group.get("scope", 0),
+            })
+
+    if not candidates:
+        print(json.dumps({"error": True, "message": f"未找到「{args.keyword}」"}, ensure_ascii=False))
+        return
+
+    # 匹配度打分：标题包含关键词 +2，精确匹配 +3，评分高 +1，在读人数多 +1
+    keyword = args.keyword.lower()
+    for c in candidates:
+        title_lower = c["title"].lower()
+        score = 0
+        if keyword == title_lower:
+            score += 3
+        elif keyword in title_lower:
+            score += 2
+        if c["rating"] and c["rating"] >= 900:
+            score += 1
+        if c["readingCount"] >= 1000:
+            score += 1
+        c["_score"] = score
+
+    # 按匹配度降序，同分按评分降序
+    candidates.sort(key=lambda x: (x["_score"], x["rating"]), reverse=True)
+
+    # 输出
+    items = []
+    for c in candidates:
+        items.append({
+            "bookId": c["bookId"],
+            "title": c["title"],
+            "author": c["author"],
+            "rating": rating_to_str(c["rating"]),
+            "readingCount": c["readingCount"],
+            "matchScore": c["_score"],
+        })
+
+    output = {
+        "keyword": args.keyword,
+        "total": len(items),
+        "candidates": items,
+    }
+
+    if getattr(args, "json", False):
+        print(json.dumps(output, ensure_ascii=False, indent=2))
+    else:
+        print(f"「{args.keyword}」找到 {len(items)} 本相关书：\n")
+        for i, item in enumerate(items, 1):
+            print(f"{i}. {item['title']}  {item['author']}  {item['rating']}  {item['readingCount']}人在读  [匹配度:{item['matchScore']}]  id:{item['bookId']}")
+        print(f"\n使用 bookId 继续操作，如：$WR book {items[0]['bookId']}")
+
+
 def cmd_inspect(api: WereadAPI, args):
     """一键查看：search + book + notes（含划线和想法），1 次 CLI 调用替代 3 轮。"""
     # 1. search
@@ -1524,6 +1595,31 @@ def cmd_readreviews(api: WereadAPI, args):
         print()
 
 
+def cmd_api_call(api: WereadAPI, args):
+    """低层逃生口：直接调用任意接口。"""
+    params = {}
+    if args.param:
+        for p in args.param:
+            if "=" not in p:
+                print(f"错误: 参数格式应为 key=value，收到: {p}", file=sys.stderr)
+                sys.exit(1)
+            k, v = p.split("=", 1)
+            # 尝试类型转换
+            if v.isdigit() or (v.startswith("-") and v[1:].isdigit()):
+                v = int(v)
+            elif v.lower() == "true":
+                v = True
+            elif v.lower() == "false":
+                v = False
+            params[k] = v
+    try:
+        result = api.call(args.api_name, **params)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    except WereadError as e:
+        print(f"错误: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_shelf_stats(api: WereadAPI, args):
     """书架分析：读完率、活跃度、TBR 堆积"""
     result = api.call("/shelf/sync")
@@ -1608,6 +1704,14 @@ def main():
     p.add_argument("--count", type=int, help="每页数量")
     add_common_args(p)
     p.set_defaults(func=cmd_search)
+
+    # resolve: 模糊书名 → 精确 bookId，按匹配度排序
+    p = sub.add_parser("resolve", help="模糊书名搜索，返回候选 bookId 列表（按匹配度排序）")
+    p.add_argument("keyword", help="书名关键词")
+    p.add_argument("--scope", type=int, default=0, help="搜索 scope（默认 0=全部）")
+    p.add_argument("--count", type=int, default=10, help="返回候选数量（默认 10）")
+    p.add_argument("--json", action="store_true", help="JSON 输出")
+    p.set_defaults(func=cmd_resolve)
 
     # inspect: search + book + notes 一步到位
     p = sub.add_parser("inspect", help="一键查看：搜索书籍并返回详情+划线+想法")
@@ -1728,6 +1832,12 @@ def main():
     # list-apis
     p = sub.add_parser("list-apis", help="列出可用 API")
     p.set_defaults(func=cmd_list_apis)
+
+    # api: 低层逃生口，直接调任意接口
+    p = sub.add_parser("api", help="低层逃生口：直接调用任意微信读书接口")
+    p.add_argument("api_name", help="接口路径，如 /store/search")
+    p.add_argument("--param", action="append", help="接口参数，格式 key=value，可重复")
+    p.set_defaults(func=cmd_api_call)
 
     args = parser.parse_args()
     if not args.command:

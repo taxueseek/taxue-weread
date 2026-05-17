@@ -14,7 +14,7 @@ version: 1.5.0
 
 | 用户意图 | 命令 | 需读取 |
 |----------|------|--------|
-| 搜书/找书 | `WR inspect <书名>` 或 `WR search <关键词> [--scope N]` | — |
+| 搜书/找书 | `WR resolve <书名>` → 获取 bookId；`WR inspect <书名>` → 一步到位 | — |
 | 书籍详情/进度 | `WR book <bookId> [--progress] [--chapters]` | — |
 | 书架一览 | `WR shelf [--summary] [--fields bookId,title,author]` | — |
 | 阅读统计/时长 | `WR readdata --mode=monthly\|annually\|overall` | `references/troubleshooting.md` |
@@ -29,7 +29,7 @@ version: 1.5.0
 
 ## 关键规则
 
-1. **inspect 优先**：用户给书名想看书/笔记时，优先 `WR inspect <书名>` 一步到位。
+1. **resolve 优先**：用户给书名时，优先 `WR resolve <书名>` 获取 bookId，再按需调 `inspect`/`book`/`notes`。不确定书名时用 `resolve` 看候选列表。
 2. **scope 默认**：默认 scope=0（泛搜）；用户明确说"找书"/"搜书"用 scope=10。
 3. **shelf 精简**：统计用 `--summary`（省 80% tokens）；书单用 `--fields bookId,title,author,category,finishReading`。
 4. **mirror 控制**：用 `--books N` 控制拉取量，避免 context 溢出。
@@ -40,7 +40,7 @@ version: 1.5.0
 
 | 用户说 | 做法 |
 |--------|------|
-| "查三体" / "三体的笔记" | `WR inspect 三体` |
+| "查三体" / "三体的笔记" | `WR resolve 三体` 拿 bookId → `WR inspect 三体` 或直接 `WR inspect 三体` |
 | "书架统计" | `WR shelf --summary` |
 | "本月读了多久" | `WR readdata --mode monthly` |
 | "帮我看看阅读" | `WR mirror --depth quick --json`（追问再加深） |
