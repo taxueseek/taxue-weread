@@ -142,14 +142,24 @@ taxue-weread/
 
 ## 安装
 
-```bash
-# 1. 复制到 skill 目录
-cp -r taxue-weread ~/.agents/skills/weread-skills
+### 方式一：npm 安装（推荐）
 
-# 2. 设置 API Key
+```bash
+npm install -g taxue-weread
+
+# 设置 API Key
 export WEREAD_API_KEY=wrk-xxxxxxxx
 
-# 3. 测试
+# 使用
+taxue-weread shelf --summary
+twr resolve 三体 --count 5 --compact
+```
+
+### 方式二：手动复制
+
+```bash
+cp -r taxue-weread ~/.agents/skills/weread-skills
+export WEREAD_API_KEY=wrk-xxxxxxxx
 cd ~/.agents/skills/weread-skills/scripts
 python3 weread.py shelf --summary
 ```
