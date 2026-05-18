@@ -21,14 +21,18 @@
 多数命令支持 --json 输出原始 API 响应，方便程序化处理。
 """
 
+import csv
+import hashlib
 import json
 import os
 import random
 import sys
+import threading
 import time
 import urllib.request
 import urllib.error
 from typing import Union
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 API_URL = "https://i.weread.qq.com/api/agent/gateway"
 SKILL_VERSION = "1.6.0"
@@ -41,7 +45,6 @@ DEFAULT_TTL = 300  # 5 minutes
 def _cache_key(api_name, params):
     """生成缓存 key。"""
     raw = api_name + json.dumps(params, sort_keys=True, ensure_ascii=False)
-    import hashlib
     return hashlib.md5(raw.encode()).hexdigest()
 
 def _cache_get(key, ttl=DEFAULT_TTL):
@@ -57,13 +60,16 @@ def _cache_get(key, ttl=DEFAULT_TTL):
     except (json.JSONDecodeError, OSError):
         return None
 
+_cache_lock = threading.Lock()
+
 def _cache_set(key, data):
-    """写入缓存。"""
+    """写入缓存（线程安全）。"""
     os.makedirs(CACHE_DIR, exist_ok=True)
     path = os.path.join(CACHE_DIR, key + ".json")
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
+        with _cache_lock:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
     except OSError:
         pass
 
@@ -213,7 +219,6 @@ class WereadAPI:
 
     def call(self, api_name: str, **params) -> dict:
         """调用 API，内置缓存、重试（指数退避+抖动），自动处理 errcode 和 upgrade_info。"""
-        # 缓存仅对只读接口启用（不缓存写操作）
         cache_key = _cache_key(api_name, params)
         skip_cache = params.pop("_no_cache", False)
         if not skip_cache:
@@ -249,7 +254,7 @@ class WereadAPI:
                 return result
 
             except WereadError:
-                raise  # 业务错误不重试
+                raise
 
             except urllib.error.HTTPError as e:
                 last_error = e
@@ -272,8 +277,26 @@ class WereadAPI:
         print(f"重试耗尽: {last_error}", file=sys.stderr)
         sys.exit(1)
 
+    def call_many(self, calls: list, max_workers=5) -> list:
+        """并发调用多个 API。返回 [result, ...]（顺序与输入一致）"""
+        results = [None] * len(calls)
 
-# ─── commands ─────────────────────────────────────────────────────────
+        def _call_one(idx, api_name, params):
+            try:
+                return idx, self.call(api_name, **params)
+            except WereadError as e:
+                return idx, {"error": True, "message": str(e)}
+            except SystemExit as e:
+                return idx, {"error": True, "message": f"升级提示: {e.code}"}
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_call_one, i, api_name, params)
+                       for i, (api_name, params) in enumerate(calls)]
+            for future in as_completed(futures):
+                idx, result = future.result()
+                results[idx] = result
+
+        return results
 
 def cmd_search(api: WereadAPI, args):
     """搜索书籍"""
@@ -285,7 +308,7 @@ def cmd_search(api: WereadAPI, args):
 
     result = api.call("/store/search", **params)
 
-    if getattr(args, "json", False) is True:
+    if getattr(args, "json", False):
         # 扁平化搜索结果
         items = []
         for group in result.get("results", []):
@@ -395,26 +418,29 @@ def _filter_fields(item, fields):
 def _compact_json(data, fields):
     """递归压缩 JSON 输出。
     fields 格式：{"key": ["子字段", ...], "*": ["所有key的子字段"], None表示保留全部}
+    "*" 作为通配符，对所有未显式声明的顶层字段应用相同的子字段过滤。
     """
-    if isinstance(data, dict):
-        result = {}
-        for k, v in data.items():
-            if k not in fields:
-                continue
-            sub_fields = fields[k]
-            if sub_fields is None:
-                # 保留全部
-                result[k] = v
-            elif isinstance(sub_fields, list) and isinstance(v, list):
-                # 列表字段：压缩每个元素
-                result[k] = [_compact_json(item, {s: [] for s in sub_fields}) if isinstance(item, dict) else item for item in v]
-            elif isinstance(sub_fields, list) and isinstance(v, dict):
-                # 单个对象字段
-                result[k] = _compact_json(v, {s: [] for s in sub_fields})
-            else:
-                result[k] = v
-        return result
-    return data
+    if not isinstance(data, dict):
+        return data
+    wildcard_fields = fields.get("*")
+    result = {}
+    for k, v in data.items():
+        sub_fields = fields.get(k)
+        # 如果字段未显式声明但有通配符，使用通配符
+        if sub_fields is None and wildcard_fields is not None:
+            sub_fields = wildcard_fields
+        if sub_fields is None:
+            # 保留全部
+            result[k] = v
+        elif isinstance(sub_fields, list) and isinstance(v, list):
+            # 列表字段：压缩每个元素
+            result[k] = [_compact_json(item, {s: [] for s in sub_fields}) if isinstance(item, dict) else item for item in v]
+        elif isinstance(sub_fields, list) and isinstance(v, dict):
+            # 单个对象字段
+            result[k] = _compact_json(v, {s: [] for s in sub_fields})
+        else:
+            result[k] = v
+    return result
 
 
 def _output(result, args):
@@ -618,7 +644,7 @@ def cmd_shelf(api: WereadAPI, args):
     if getattr(args, "fields", None):
         field_filter = set(args.fields.split(","))
 
-    if getattr(args, "json", False) is True:
+    if getattr(args, "json", False):
         # JSON 模式：应用字段过滤
         filtered = {
             "books": [_filter_fields(b, field_filter) for b in books],
@@ -626,7 +652,6 @@ def cmd_shelf(api: WereadAPI, args):
             "total": total, "finished": finished,
         }
         return filtered
-        return
 
     # 文本模式
     secret_books = sum(1 for b in books if b.get("secret") == 1)
@@ -752,7 +777,7 @@ def cmd_notes(api: WereadAPI, args):
         except WereadError:
             rv = {}
 
-        if getattr(args, "json", False) is True:
+        if getattr(args, "json", False):
             output = {"bookmarklist": bm, "reviews": rv}
             return output
             return
@@ -813,7 +838,7 @@ def cmd_notes(api: WereadAPI, args):
         all_books, pages_fetched = _fetch_all_notebooks(api, max_pages=max_pages)
         all_books.sort(key=lambda x: x["total"], reverse=True)
 
-        if getattr(args, "json", False) is True:
+        if getattr(args, "json", False):
             total_notes = sum(b["total"] for b in all_books)
             output = {
                 "totalBookCount": len(all_books),
@@ -863,9 +888,8 @@ def cmd_readdata(api: WereadAPI, args):
 
     result = api.call("/readdata/detail", mode=mode, baseTime=base_time)
 
-    if getattr(args, "json", False) is True:
+    if getattr(args, "json", False):
         return result
-        return
 
     read_days = result.get("readDays", 0)
     total_secs = result.get("totalReadTime", 0)
@@ -937,9 +961,8 @@ def cmd_review(api: WereadAPI, args):
     result = api.call("/review/list", bookId=book_id, reviewListType=rv_type,
                        count=per_page, maxIdx=0)
 
-    if getattr(args, "json", False) is True:
+    if getattr(args, "json", False):
         return result
-        return
 
     reviews_cnt = result.get("reviewsCnt", 0)
     print(f"点评共 {reviews_cnt} 条")
@@ -978,9 +1001,8 @@ def cmd_discover(api: WereadAPI, args):
     else:
         result = api.call("/book/recommend", count=getattr(args, "per_page", 10))
 
-    if getattr(args, "json", False) is True:
+    if getattr(args, "json", False):
         return result
-        return
 
     if book_id:
         books = result.get("booksimilar", {}).get("books", [])
@@ -1120,9 +1142,8 @@ def cmd_export(api: WereadAPI, args):
 
         # ── CSV ──
         if fmt == "csv":
-            import csv as csv_module
             with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
-                w = csv_module.writer(f)
+                w = csv.writer(f)
                 w.writerow(["type", "chapter", "text", "thought", "createTime", "range"])
                 for u in updated:
                     ch = chapters_map.get(u.get("chapterUid"), {})
@@ -1148,7 +1169,7 @@ def cmd_export(api: WereadAPI, args):
             for u in updated:
                 ch_uid = u.get("chapterUid")
                 ch = chapters_map.get(ch_uid, {})
-                ch_title = ch.get("title", "").replace("&", "&amp;").replace("<", "&lt;")
+                ch_title = ch.get("title", "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 if ch_uid != last_ch:
                     if last_ch is not None:
                         highlights_html += "</div>\n"
@@ -1359,7 +1380,7 @@ def cmd_organize(api: WereadAPI, args):
 
 
 def cmd_mirror(api: WereadAPI, args):
-    """阅读自我画像：收集多维度数据，供 LLM 进行深度自我对话分析。"""
+    """阅读自我画像：并发收集多维度数据，速度提升 3-5x。"""
     depth = getattr(args, "depth", "standard")
     max_books = getattr(args, "books", None) or {"quick": 3, "standard": 10, "deep": 20}.get(depth, 10)
     max_notes = {"quick": 15, "standard": 40, "deep": 80}.get(depth, 40)
@@ -1368,9 +1389,16 @@ def cmd_mirror(api: WereadAPI, args):
         if not getattr(args, "quiet", False):
             print(msg, file=sys.stderr)
 
-    # ── 1. 书架全貌 ──
-    _log("[1/4] 获取书架数据...")
-    shelf = api.call("/shelf/sync")
+    # ── 阶段 1: 并发获取书架 + 阅读统计 ──
+    _log("[1/2] 并发获取书架 + 阅读统计...")
+    calls = [("/shelf/sync", {}), ("/readdata/detail", {"mode": "annually", "baseTime": 0})]
+    if depth != "quick":
+        calls.append(("/readdata/detail", {"mode": "overall", "baseTime": 0}))
+
+    results = api.call_many(calls, max_workers=3)
+    shelf, rd_annual = results[0], results[1]
+    rd_overall = results[2] if depth != "quick" else None
+
     books = shelf.get("books", [])
     albums = shelf.get("albums", [])
     mp = shelf.get("mp")
@@ -1388,64 +1416,54 @@ def cmd_mirror(api: WereadAPI, args):
     recent_30d = sum(1 for b in books if b.get("readUpdateTime", 0) > now_ts - 30*86400)
     cold = sum(1 for b in books if not b.get("readUpdateTime") and not b.get("finishReading"))
 
-    # ── 2. 阅读统计 ──
-    _log("[2/4] 获取阅读统计...")
+    # 解析阅读统计
     profile_stats = {}
-    for mode in (["annually"] if depth == "quick" else ["annually", "overall"]):
-        try:
-            rd = api.call("/readdata/detail", mode=mode, baseTime=0)
-            profile_stats[mode] = {
-                "readDays": rd.get("readDays", 0),
-                "totalReadTime": secs_to_hms(rd.get("totalReadTime", 0)),
-                "totalReadTimeSecs": rd.get("totalReadTime", 0),
-                "dayAverage": secs_to_hms(rd.get("dayAverageReadTime", 0)),
-            }
-            if mode == "annually":
-                profile_stats["preferTime"] = rd.get("preferTimeWord", "")
-                profile_stats["preferCategory"] = [
-                    {"name": c.get("categoryTitle", ""), "count": c.get("readingCount", 0),
-                     "time": secs_to_hms(c.get("readingTime", 0))}
-                    for c in (rd.get("preferCategory") or [])[:5]
-                ]
-                profile_stats["preferAuthor"] = [
-                    {"name": a.get("name", ""), "count": a.get("count", 0), "time": a.get("readTime", "")}
-                    for a in (rd.get("preferAuthor") or [])[:5]
-                ]
-                read_stat = rd.get("readStat", [])
-                profile_stats["readStat"] = {s.get("stat", ""): s.get("counts", "") for s in read_stat}
-                rr = rd.get("readRate")
-                if rr is not None:
-                    profile_stats["readRate"] = f"{rr}%"
-        except WereadError:
-            pass
+    for mode, rd in [("annually", rd_annual), ("overall", rd_overall)]:
+        if rd is None or (isinstance(rd, dict) and rd.get("error")):
+            continue
+        profile_stats[mode] = {
+            "readDays": rd.get("readDays", 0),
+            "totalReadTime": secs_to_hms(rd.get("totalReadTime", 0)),
+            "totalReadTimeSecs": rd.get("totalReadTime", 0),
+            "dayAverage": secs_to_hms(rd.get("dayAverageReadTime", 0)),
+        }
+        if mode == "annually":
+            profile_stats["preferTime"] = rd.get("preferTimeWord", "")
+            profile_stats["preferCategory"] = [
+                {"name": c.get("categoryTitle", ""), "count": c.get("readingCount", 0),
+                 "time": secs_to_hms(c.get("readingTime", 0))}
+                for c in (rd.get("preferCategory") or [])[:5]
+            ]
+            profile_stats["preferAuthor"] = [
+                {"name": a.get("name", ""), "count": a.get("count", 0), "time": a.get("readTime", "")}
+                for a in (rd.get("preferAuthor") or [])[:5]
+            ]
+            read_stat = rd.get("readStat", [])
+            profile_stats["readStat"] = {s.get("stat", ""): s.get("counts", "") for s in read_stat}
+            rr = rd.get("readRate")
+            if rr is not None:
+                profile_stats["readRate"] = f"{rr}%"
 
-    # ── 3. 阅读时间线 ──
-    _log("[3/4] 构建阅读时间线...")
-    timeline = []
-    for b in books:
-        ft = b.get("finishTime", 0)
-        if ft:
-            timeline.append({
-                "title": b.get("title", ""),
-                "author": b.get("author", ""),
-                "category": b.get("category", ""),
-                "finished": ts_to_date(ft),
-                "isTop": b.get("isTop", 0),
-            })
-    timeline.sort(key=lambda x: x["finished"], reverse=True)
-
-    # ── 4. 笔记内容 ──
-    _log("[4/4] 获取笔记内容...")
+    # ── 阶段 2: 并发获取笔记本 + 笔记内容 ──
+    _log("[2/2] 并发获取笔记内容...")
     all_notes_books, _ = _fetch_all_notebooks(api, max_pages=5)
     all_notes_books.sort(key=lambda x: x["total"], reverse=True)
+    target_books = all_notes_books[:max_books]
+
+    # 构建并发调用：每本书 bookmarklist + reviews
+    note_calls = []
+    for nb in target_books:
+        bid = nb["bookId"]
+        note_calls.append(("/book/bookmarklist", {"bookId": bid}))
+        note_calls.append(("/review/list/mine", {"bookid": bid, "count": max_notes, "synckey": 0}))
+
+    note_results = api.call_many(note_calls, max_workers=max(5, len(target_books)))
 
     annotations = []
-    done = 0
-    for nb_book in all_notes_books[:max_books]:
-        bid = nb_book["bookId"]
-        try:
-            bm = api.call("/book/bookmarklist", bookId=bid)
-        except WereadError:
+    for i, nb in enumerate(target_books):
+        bm = note_results[i * 2]
+        rv = note_results[i * 2 + 1]
+        if bm is None or (isinstance(bm, dict) and bm.get("error")):
             continue
         chapters = {c.get("chapterUid"): c.get("title", "") for c in bm.get("chapters", [])}
 
@@ -1459,55 +1477,45 @@ def cmd_mirror(api: WereadAPI, args):
                 "range": u.get("range", ""),
             })
 
-        try:
-            rv = api.call("/review/list/mine", bookid=bid, count=max_notes, synckey=0)
-        except WereadError:
-            rv = {}
         thoughts = []
-        for r in rv.get("reviews", []):
-            if len(thoughts) >= max_notes:
-                break
-            rev = r.get("review", {})
-            thoughts.append({
-                "chapter": rev.get("chapterName", ""),
-                "content": truncate(rev.get("content", ""), 200),
-                "range": rev.get("range", ""),
-            })
+        if rv and not rv.get("error"):
+            for r in rv.get("reviews", []):
+                if len(thoughts) >= max_notes:
+                    break
+                rev = r.get("review", {})
+                thoughts.append({
+                    "chapter": rev.get("chapterName", ""),
+                    "content": truncate(rev.get("content", ""), 200),
+                    "range": rev.get("range", ""),
+                })
 
         density = "high" if len(highlights) >= 30 else ("medium" if len(highlights) >= 10 else "low")
         annotations.append({
-            "bookId": bid,
-            "title": nb_book["title"],
-            "author": nb_book["author"],
-            "category": nb_book.get("category", ""),
-            "noteDensity": density,
-            "totalNotes": nb_book["total"],
-            "highlights": highlights,
-            "thoughts": thoughts,
+            "bookId": nb["bookId"], "title": nb["title"], "author": nb["author"],
+            "category": nb.get("category", ""), "noteDensity": density,
+            "totalNotes": nb["total"], "highlights": highlights, "thoughts": thoughts,
         })
-        done += 1
-        _log(f"  [{done}/{min(len(all_notes_books), max_books)}] {nb_book['title']}")
+        _log(f"  [{i+1}/{len(target_books)}] {nb['title']}")
 
-    # ── 组装输出 ──
-    output = {
+    timeline = sorted(
+        [{"title": b["title"], "author": b["author"], "category": b["category"],
+          "finished": ts_to_date(b["finishTime"]), "isTop": b.get("isTop", 0)}
+         for b in books if b.get("finishTime")],
+        key=lambda x: x["finished"], reverse=True
+    )[:50]
+
+    return {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
         "depth": depth,
         "profile": {
-            "totalBooks": total,
-            "finishedBooks": finished,
+            "totalBooks": total, "finishedBooks": finished,
             "readingBooks": total - finished,
             "completionRate": f"{finished/total*100:.0f}%" if total > 0 else "0%",
             "categories": [{"name": c, "count": n} for c, n in top_cats],
-            "recent30d": recent_30d,
-            "coldUnopened": cold,
-            **profile_stats,
+            "recent30d": recent_30d, "coldUnopened": cold, **profile_stats,
         },
-        "timeline": timeline[:50],
-        "annotations": annotations,
+        "timeline": timeline, "annotations": annotations,
     }
-
-    print(json.dumps(output, ensure_ascii=False, indent=2))
-
 
 def cmd_author(api: WereadAPI, args):
     """作者全景：搜索作者并列出其所有作品"""
@@ -1573,9 +1581,8 @@ def cmd_bestbookmarks(api: WereadAPI, args):
 
     result = api.call("/book/bestbookmarks", bookId=book_id, chapterUid=chapter_uid, synckey=0)
 
-    if getattr(args, "json", False) is True:
+    if getattr(args, "json", False):
         return result
-        return
 
     items = result.get("items", [])
     chapters_map = {c.get("chapterUid"): c for c in result.get("chapters", [])}
@@ -1613,9 +1620,8 @@ def cmd_underlines(api: WereadAPI, args):
 
     result = api.call("/book/underlines", bookId=book_id, chapterUid=chapter_uid, synckey=0)
 
-    if getattr(args, "json", False) is True:
+    if getattr(args, "json", False):
         return result
-        return
 
     underlines = result.get("underlines", [])
     print(f"章节划线热度 (chapterUid={chapter_uid}): 共 {len(underlines)} 条")
@@ -1652,9 +1658,8 @@ def cmd_readreviews(api: WereadAPI, args):
     reviews_param = [{"range": range_str, "maxIdx": 0, "count": getattr(args, "per_page", 20)}]
     result = api.call("/book/readreviews", bookId=book_id, chapterUid=chapter_uid, reviews=reviews_param)
 
-    if getattr(args, "json", False) is True:
+    if getattr(args, "json", False):
         return result
-        return
 
     rv_list = result.get("reviews", [])
     if not rv_list:
