@@ -34,6 +34,11 @@
 | shelf 统计 | 全量 239K chars | --summary **429 chars** | token -99.8% |
 | 重复调用 | 每次 ~1s | 缓存命中 **0.07s** | 13x |
 | "看三体笔记" | 3 轮 API | **1 轮** | 轮次 -67% |
+| mirror quick | 3.5s | **0.62s** | **5.6x** |
+| mirror standard | 4.6s | **1.46s** | **3.1x** |
+| inspect（任意书） | ~1.5s | **1.3-1.6s** | 持平 |
+| 并发 API 调用 | ❌ 串行 | ✅ ThreadPoolExecutor | **5-6x** |
+| 缓存安全 | ❌ 无锁 | ✅ threading.Lock | 线程安全 |
 
 ## 独有功能
 
