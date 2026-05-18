@@ -1,6 +1,6 @@
 # taxue-weread
 
-微信读书官方 Skill 的 Agent 优化版——用一个 CLI 把 API 调用、缓存、重试、分析全包了。
+微信读书官方 Skill 的 Agent 优化版，用一个 CLI 把工作全包了。
 
 ## 它能做什么
 
@@ -17,22 +17,16 @@ taxue-weread 帮你管理微信读书上的所有数据：查书架、搜书、�
 ## 和官方版本的区别
 
 微信读书官方提供了一套 API 接口，但用起来比较原始：
-- 查一次书架，几百本书全量返回，Agent context 直接爆炸
-- 想看某本书的笔记，要先搜索获取 bookId，再调书籍接口，再调笔记接口，串行三轮
-- 没有缓存，同一个命令反复调用每次都要等网络
-- API 的语义陷阱很多（比如时长单位是秒、progress=1 表示 1% 不是 100%）
+
 
 taxue-weread 解决这些问题：
-- **精简输出**：`shelf --summary` 只输出 400 多字符，省 99% 的 token
-- **合并命令**：`inspect 三体` 一步到位，不用串行调三轮
-- **自动缓存**：5 分钟 TTL，重复调用快 13 倍
-- **自动重试**：网络波动时自动重试 3 次，指数退避
+- **精简输出**：节省的 token，提升查询速度
 - **语义处理**：CLI 自动转换时长单位、进度百分比、书架计数口径，Agent 不用记
-- **智能分析**：`mirror` 做阅读画像，`organize` 做笔记整理，不是罗列数据，而是给洞察
+- **智能分析**：`mirror` 做阅读画像，`organize` 做笔记整理，不罗列数据，给出洞察
 
 ## 安装
 
-**需要：Node.js >= 18，Python 3**
+
 
 **Claude Code / Codex 用户（推荐）：**
 
@@ -52,7 +46,7 @@ npm install -g taxue-weread
 export WEREAD_API_KEY=wrk-xxxxxxxx
 ```
 
-API Key 获取方式：访问 [微信读书 Skill 官方页面](https://weread.qq.com/r/weread-skills)，登录后复制。
+API Key 获取方式：访问 [微信读书 Skill 官方页面](https://weread.qq.com/r/weread-skills)，登录后复制，最好先登录微信读书网页版，然后再进入页面，获取对应的API，你没有先登录微信网页版，就经常获取不到key。
 
 ## 快速上手
 
@@ -109,7 +103,7 @@ $ twr inspect 三体
 
 ### 3. 阅读画像
 
-不是展示原始数据，而是分析你的阅读习惯：
+不只是展示原始数据，会分析你的阅读习惯：
 
 ```bash
 $ twr mirror --depth quick
@@ -130,19 +124,11 @@ $ twr mirror --depth quick
 
 自动检测「装饰性素材」——去掉它论点还成立的内容，建议删掉。
 
-### 5. 缓存 + 自动重试
+### 5. 缓存 
 
 ```bash
-# 第一次
-$ time twr shelf --json
-0.92s
+# 查询后建立缓存，方便后续查询。因为阅读数据其实不会有太大的变化。
 
-# 第二次（缓存命中）
-$ time twr shelf --json
-0.07s   # 13 倍快
-```
-
-网络不好的时候自动重试 3 次，不用手动处理。
 
 ## 命令速查
 
@@ -181,7 +167,7 @@ taxue-weread/
     └── scope.md              # 搜索类型选择
 ```
 
-SKILL.md 采用「核心指令 + 按需加载」的设计：主文件只有 59 行，6 个 reference 文件在 Agent 需要时才加载。实测比全量加载省 36% 的 token。
+SKILL.md 采用「核心指令 + 按需加载」的设计：文件在 Agent 需要时才加载。实测比全量加载省 36% 的 token。
 
 ## 致谢
 
