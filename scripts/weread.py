@@ -35,7 +35,7 @@ from typing import Union
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 API_URL = "https://i.weread.qq.com/api/agent/gateway"
-SKILL_VERSION = "1.6.0"
+SKILL_VERSION = "1.7.0"
 
 # ─── cache ────────────────────────────────────────────────────────────
 
