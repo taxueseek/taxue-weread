@@ -1,165 +1,236 @@
 ---
 name: taxue-weread
-description: 微信读书助手 — 搜索书籍、管理书架、查看笔记划线、浏览书评、阅读统计、发现推荐好书、导出笔记、整理读书笔记、阅读数据分析、精细化推荐（书/作者/章节/版本）、阅读画像分析。当用户提到"微信读书"、"读书笔记"、"书架"、"划线"、"阅读统计"、"读了多久"、"导出笔记"、"推荐书"、"书单"、"阅读画像"、"分析一下我的阅读"、"帮我选书"、"推荐几本书"、"推荐作者"、"哪个版本好"、"重点看哪章"时触发。
-version: 1.5.1
+description: |
+  微信读书原子操作层。搜索书籍、管理书架、查看笔记划线、阅读统计、导出笔记、每日回顾、精细化推荐、阅读画像、笔记整理。
+  当用户需要直接操作微信读书数据（搜书、查书架、看笔记、统计、导出、回顾、推荐、画像）时触发。
+  触发：搜书、查书架、看笔记、导出划线、阅读统计、读了多少、书架有几本、
+        这本书划线、我的笔记、读书报告、推荐书、微信读书、weread、
+        今日笔记、推一条划线、读书回顾、每日回顾、推荐几本书、推荐作者、
+        哪个版本好、重点看哪章、阅读画像、分析一下我的阅读、帮我选书
+version: 1.7.0
 ---
 
-# WeRead — 微信读书助手
+# taxue-weread：微信读书原子操作层
 
-**CLI：`scripts/weread.py`（别名 `WR`）。内置鉴权、缓存（TTL=5min）、重试、分页、深度链接。**
+> 数据不流动就是死数据。让 LLM 直接读写微信读书，不绕弯。
 
-需要 `WEREAD_API_KEY`。LLM 调用一律加 `--json`。详细参数用 `$WR <cmd> --help`。
+---
 
-## 性能基准与效率策略
+## 核心哲学
+
+### 原则 1：Python 直调，不套壳
+LLM 直接调 Python 脚本，少一层进程开销，少一个依赖检查。
+
+### 原则 2：能合并就合并，能并行就并行
+每次进程启动 ~85ms 固定开销。多本书信息用 `weread_batch.py` 一次搞定，推荐引擎内部全部并行，5 分钟内的重复查询走缓存。
+
+### 原则 3：错误必须可行动
+API 返回的 `errcode` 不是给人看的，是给 LLM 看的。每个错误码对应一个明确动作，LLM 看到错误就知道下一步做什么。
+
+---
+
+## Phase 0：意图验证
+
+收到请求后，先判断用户真正要什么：
+
+```
+用户说了什么？
+├── 搜书 / 找书 / 有没有这本书          → search / resolve
+├── 书架 / 在读 / 读了几本               → shelf / shelf-stats
+├── 笔记 / 划线 / 摘抄 / 想法           → notes / bestbookmarks
+├── 这本书的详情 / 章节 / 进度           → book / inspect
+├── 读了多久 / 统计 / 报告              → readdata / report
+├── 导出 / 下载 / 备份                  → export（支持 md/json/csv/card）
+├── 今日笔记 / 推一条划线 / 回顾         → daily-review
+├── 推荐书 / 推荐作者 / 哪个版本好       → weread_recommend.py
+├── 重点看哪章 / 章节推荐                → weread_chapters.py
+├── 阅读画像 / 分析我的阅读              → mirror
+├── 笔记整理 / 提炼写作素材              → organize
+└── 想搞懂 X / 系统学习 X                → 路由到 advisor/path
+```
+
+**验证点**：用户给的是书名还是 bookId？书名必须先 `search` 或 `resolve` 拿 bookId，禁止裸传书名给需要 bookId 的接口。
+
+---
+
+## Phase 1：执行
+
+**CLI 路径**：`python3 ~/.agents/skills/taxue-weread/scripts/weread.py`（别名 `WR`）
+
+**所有命令加 `--json`**，让 LLM 能解析结构化输出。
+
+### 意图路由表
+
+| 用户意图 | 命令 | 缓存 |
+|---------|------|------|
+| 搜书 | `WR search <keyword> --json` | 5min |
+| 模糊书名→bookId | `WR resolve <书名> --json` | 5min |
+| 一键查详情+划线 | `WR inspect <书名> --json` | 5min |
+| 查书架 | `WR shelf --json` | 5min |
+| 书架精简统计 | `WR shelf --summary` | 5min |
+| 书架分析 | `WR shelf-stats` | 5min |
+| 书籍详情 | `WR book <id> --json` | 5min |
+| 章节目录 | `WR book <id> --chapters` | 5min |
+| 笔记/划线 | `WR notes --book <id> --json` | 5min |
+| 热门划线 | `WR bestbookmarks <id> --json` | 5min |
+| 划线热度统计 | `WR underlines <id> --chapter <uid> --json` | 5min |
+| 划线下想法 | `WR readreviews <id> --chapter <uid> --range "x-y" --json` | 5min |
+| 阅读统计 | `WR readdata --mode overall --json` | 5min |
+| 阅读仪表盘 | `WR report` | 实时 |
+| 阅读画像 | `WR mirror [--depth quick\|standard\|deep]` | 5min |
+| 书籍点评 | `WR review --book <id> --json` | 5min |
+| 发现推荐 | `WR discover --json` | 5min |
+| 导出划线+想法 | `WR export <id> --format md\|json\|csv\|card` | 实时 |
+| 批量导出全部 | `WR export --all --output <目录>` | 实时 |
+| 收集笔记数据 | `WR organize --json` | 实时 |
+| 作者全景 | `WR author <name> --json` | 5min |
+| 低层逃生口 | `WR api <api_name> --json` | 按接口 |
+| 列出可用API | `WR list-apis` | 无 |
+
+### 批量操作
+
+| 场景 | 命令 | 为什么更快 |
+|------|------|----------|
+| 多本书详情 | `python3 scripts/weread_batch.py info <id1> <id2> ...` | 一次进程替代 N 次 |
+| 多关键词搜索 | `python3 scripts/weread_batch.py search <kw1> <kw2> ...` | 一次进程替代 N 次 |
+| 批量并行搜索 | `python3 scripts/weread_search.py <书名1> <书名2> ...` | 并行，0.6秒/20本 |
+
+### 精细化推荐引擎
+
+| 场景 | 命令 | 耗时 |
+|------|------|------|
+| 推荐书 | `python3 scripts/weread_recommend.py books "关键词" [--limit 10]` | ~1.3s |
+| 推荐作者 | `python3 scripts/weread_recommend.py authors "关键词" [--limit 5]` | ~0.6s |
+| 版本对比 | `python3 scripts/weread_recommend.py versions "书名"` | ~0.8s |
+| 相似书 | `python3 scripts/weread_recommend.py similar <bookId>` | ~1s |
+| 综合画像推荐 | `python3 scripts/weread_recommend.py profile --data <用户数据JSON>` | ~1s |
+| 章节推荐（关键词） | `python3 scripts/weread_recommend.py chapters <bookId> "关键词"` | ~1s |
+| 章节推荐（语义） | `python3 scripts/weread_chapters.py <bookId> "查询"` → 喂模型 | ~1s |
+
+---
+
+## Phase 2：输出格式化
+
+### 数据展示规范
+
+| 字段类型 | 规则 | 示例 |
+|---------|------|------|
+| Unix 时间戳 | → `YYYY-MM-DD` | `1748563200` → `2025-05-30` |
+| 阅读时长（秒） | → `X小时Y分钟` | `3661` → `1小时1分钟` |
+| 进度 | → `X%` | `75` → `75%` |
+| bookId | 不裸出现 | 转 `weread://reading?bId=xxx` 链接 |
+| 搜索结果 | 编号展示方便选择 | 1. 《三体》刘慈欣 ⭐8.8 |
+| 评分（newRating） | 除以10转百分制 | `930` → `93%` |
+
+### 深度链接格式
+
+```
+书籍：weread://reading?bId={bookId}
+章节：weread://reading?bId={bookId}&chapterUid={chapterUid}
+划线：weread://bestbookmark?bookId={bookId}&chapterUid={chapterUid}&rangeStart={start}&rangeEnd={end}
+```
+
+---
+
+## 错误处理
+
+| 错误 | 含义 | LLM 应该做什么 |
+|------|------|---------------|
+| `WEREAD_API_KEY 未设置` | 环境变量缺失 | 提示用户 `export WEREAD_API_KEY=wrk-xxx` |
+| `API 错误 (errcode=401)` | Key 失效 | 提示用户重新获取 API Key |
+| `API 错误 (errcode=404)` | 资源不存在 | 告诉用户这本书/笔记不存在 |
+| `⚠️ upgrade_info` | 技能版本需升级 | 立即暂停，按提示升级后重试 |
+| `HTTP 5xx` | 服务端错误 | 已自动重试 3 次，仍失败则告知用户稍后再试 |
+| 书名搜不到 | 多候选或零结果 | 展示候选列表让用户选，或建议换关键词 |
+
+---
+
+## 边界
+
+- **不做**：裸传书名给需要 bookId 的接口（必须先 search/resolve）
+- **不做**：串行循环查询多本书（必须用批量脚本）
+- **不做**：猜测字段含义（以 `weread-skills` 的说明文件为准）
+- **做**：缓存命中时直接返回（5min TTL）
+- **做**：批量查询时合并进程
+- **做**：错误码映射到可行动作
+- **做**：网络波动时自动重试（3次指数退避+随机抖动）
+
+---
+
+## 性能基准
 
 | 操作 | 耗时 | 说明 |
 |------|------|------|
-| 进程启动 | ~85ms | 每次调用固定开销，**能合并就合并** |
-| search（缓存命中） | ~0.1s | 5分钟TTL |
-| search（网络） | ~1s | 实际API请求 |
-| 批量查询5本 | ~0.5s | `scripts/weread_batch.py info`，一次进程 |
-| 批量搜索多关键词 | ~0.2s | `scripts/weread_batch.py search`，并行 |
-| 推荐书（含多关键词） | ~1.3s | `scripts/weread_recommend.py books` |
-| 推荐作者 | ~0.6s | `scripts/weread_recommend.py authors` |
-| 版本对比 | ~0.8s | `scripts/weread_recommend.py versions` |
-| 章节推荐 | ~1s | `scripts/weread_recommend.py chapters` |
-| mirror deep | ~2.7s | 最慢，按需使用 |
+| 进程启动 | ~85ms | 每次调用固定开销 |
+| search（缓存命中） | ~0.07s | 5min TTL |
+| search（网络） | ~1s | 实际 API 请求 |
+| 批量查询 5 本 | ~0.5s | `weread_batch.py info` |
+| 批量搜索多关键词 | ~0.2s | `weread_batch.py search` |
+| mirror quick | ~0.6s | 精简画像 |
+| mirror standard | ~1.5s | 标准画像 |
+| mirror deep | ~2.7s | 深度画像 |
+| 推荐书 | ~1.3s | 含多关键词并行 |
+| 推荐作者 | ~0.6s | 并行搜索 |
 
-**核心效率原则：**
-1. **能合并就合并**：多本书信息查询用 `weread_batch.py`，一次进程替代多次
-2. **能并行就并行**：推荐引擎内部全部并行，不串行调 API
-3. **能缓存就缓存**：5分钟 TTL，重复请求自动命中
-4. **能推断就不搜**：根据用户已有数据（书架、笔记、阅读历史）直接推断，不重复拉取
-
-## 意图路由
-
-| 用户意图 | 命令 | 备注 |
-|----------|------|------|
-| 搜书（单本） | `WR search <书名> --json` | 精确匹配 |
-| 搜书（批量） | `scripts/weread_search.py 书名1 书名2 ...` | 并行，0.6秒/20本 |
-| 书籍详情 | `WR book <bookId>` | 文本输出，含简介 |
-| 批量查详情 | `scripts/weread_batch.py info <id1> <id2> ...` | 一次进程 |
-| 书架一览 | `WR shelf [--summary]` | 统计用 `--summary` |
-| 阅读统计 | `WR readdata --mode monthly\|annually\|overall` | 时长单位：秒 |
-| 笔记/划线 | `WR notes --book <bookId>` | |
-| 热门划线 | `WR bestbookmarks <bookId>` | TOP20，按热度 |
-| 章节目录 | `WR book <bookId> --chapters` | 文本输出 |
-| 阅读画像 | `WR mirror [--depth quick\|standard\|deep]` | |
-| 导出笔记 | `WR export <bookId>\|--all --output <路径>` | |
-
-## 精细化推荐路由
-
-| 推荐类型 | 命令 | 输出 |
-|----------|------|------|
-| **推荐书** | `scripts/weread_recommend.py books "关键词"` | 书列表，含评分/分类 |
-| **推荐作者** | `scripts/weread_recommend.py authors "关键词"` | 作者列表，含代表作/均分 |
-| **版本对比** | `scripts/weread_recommend.py versions "书名"` | 多版本对比，标注推荐 |
-| **相似书** | `scripts/weread_recommend.py similar <bookId>` | 相似书列表 |
-| **综合画像** | `scripts/weread_recommend.py profile --data <用户数据JSON>` | 多维度推荐 |
-| **章节推荐（关键词）** | `scripts/weread_recommend.py chapters <bookId> "关键词"` | 关键词硬匹配 |
-| **章节推荐（模型）** | `scripts/weread_chapters.py <bookId> "查询"` → 模型推理 | 语义匹配，更准确 |
-
-## 关键规则
-
-1. **search 优先**：`WR search` 精确匹配。`resolve` 精度低，仅在不确定书名时用。
-2. **批量必须并行**：超过3本书或关键词，一律用脚本并行，禁止串行循环。
-3. **合并进程**：需要多本书的信息时，用 `weread_batch.py info` 一次查完，不要逐本调 `WR book`。
-4. **缓存策略**：5分钟 TTL（`/tmp/weread_cache/`，458文件/3.4MB）。需要刷新时 `WEREAD_NO_CACHE=1`。
-5. **API 陷阱**：时长单位秒、newRating 0-1000（除以10得百分比）、progress 0-100 整数。
-
-## 工作流
-
-### 精细化推荐（核心场景）
-
-```
-1. 获取用户数据（已有缓存则跳过）
-   - WR mirror --depth quick → 书架概览 + 笔记分布
-   - WR readdata --mode overall → 核心统计
-
-2. 根据用户需求选择推荐类型
-   - "推荐书" → weread_recommend.py books
-   - "推荐作者" → weread_recommend.py authors
-   - "哪个版本好" → weread_recommend.py versions
-   - "重点看哪章" → weread_recommend.py chapters
-   - "推荐画像" → weread_recommend.py profile
-
-3. 输出推荐结果
-   - 书名/作者/章节名
-   - 评分 + 评价人数
-   - 推荐理由（结合用户数据）
-   - 深度链接（weread://reading?bId=xxx）
-```
-
-### 推荐输出格式
-
-**推荐书：**
-```
-📚 《书名》
-   作者 | 评分% (N人评) | 分类
-   推荐理由：xxx
-   🔗 weread://reading?bId=xxx
-```
-
-**版本对比：**
-```
-📚 书名 (N个版本)
-   ✅ 推荐：版本名 | 评分% | N人评
-      理由：评分最高，评价人数最多
-   ❌ 版本名 | 评分% | N人评
-```
-
-**章节推荐（模型驱动）：**
-```
-步骤：
-1. python3 scripts/weread_chapters.py <bookId> "用户查询"
-   → 获取目录 + 划线 + prompt
-2. 将 prompt 喂给模型做语义匹配
-   → 模型返回 JSON（章节名、推荐理由、相关度）
-3. 格式化输出给用户
-
-输出示例：
-📖 纳瓦尔宝典 — "关于财富积累"
-   1. 第一部分 财富 ⭐⭐⭐⭐⭐
-      理由：12条热门划线，核心讲的是财富积累方法
-      💬 "获得财富的一个途径，就是为社会提供其有需求但无从获得的东西"
-   2. 第一章 积累财富 ⭐⭐⭐⭐
-      理由：专讲财富积累的具体方法
-```
-
-### 阅读画像分析
-
-```
-1. WR mirror --depth deep --json → 全量数据
-2. WR readdata --mode overall --json → 核心统计
-3. 分析：思维结构、阅读人格、年度趋势、盲区识别
-4. 生成推荐：基于盲区 → weread_recommend.py profile
-```
-
-### 年度报告
-
-```
-1. WR mirror --depth deep --json
-2. WR readdata --mode annually --json
-3. 两个命令可并行
-4. 注入 weread-insight 模板 → HTML 报告
-```
-
-## 脚本清单
-
-| 脚本 | 用途 |
-|------|------|
-| `scripts/weread.py` | 核心 CLI，所有 API 调用 |
-| `scripts/weread_search.py` | 批量并行搜索（多本书名） |
-| `scripts/weread_batch.py` | 批量查询（多本书详情/搜索/笔记/划线） |
-| `scripts/weread_recommend.py` | 精细化推荐引擎（书/作者/版本/相似/画像） |
-| `scripts/weread_chapters.py` | 章节推荐数据拉取 + 模型 prompt 生成 |
+---
 
 ## 参考文档
 
 | 文档 | 何时读取 |
 |------|---------|
-| `references/troubleshooting.md` | **必读**：API 陷阱 + 字段语义 |
-| `references/mirror-guide.md` | 阅读画像分析时 |
-| `references/organize-guide.md` | 整理笔记时 |
-| `references/material-grading.md` | 提取写作素材时 |
-| `references/readdata.md` | 跨周期统计时 |
+| `references/troubleshooting.md` | API 报错、字段语义 |
+| `references/mirror-guide.md` | 阅读画像分析 |
+| `references/readdata.md` | 跨周期统计 |
+| `references/material-grading.md` | 提取写作素材 |
+| `references/organize-guide.md` | 笔记数据收集 |
+| `references/scope.md` | search scope 参数 |
+
+---
+
+## 下游路由
+
+| 场景 | 路由 |
+|------|------|
+| 推荐/书单/笔记炼金/分析/教练/导出/复盘 | `advisor/SKILL.md` |
+| 个人知识库生成（选题库/观点库/知识图谱） | `mine/SKILL.md` |
+
+---
+
+## 每日回顾
+
+从已有缓存中随机挑一条划线推送，自动去重。**不发新 API 请求**，复用 `/tmp/weread_cache/` 中的数据。
+
+### 命令
+
+```bash
+python3 ~/.agents/skills/taxue-weread/scripts/weread.py daily-review
+python3 ~/.agents/skills/taxue-weread/scripts/weread.py daily-review --json
+python3 ~/.agents/skills/taxue-weread/scripts/weread.py daily-review --notify
+python3 ~/.agents/skills/taxue-weread/scripts/weread.py daily-review --reset
+```
+
+### 参数
+
+| 参数 | 说明 |
+|------|------|
+| `--json` | 输出 JSON（LLM 解析用） |
+| `--notify` | 同时发 macOS 系统通知 |
+| `--reset` | 清空推送历史，重新开始 |
+
+### 机制
+
+- 从 `/tmp/weread_cache/` 中读取所有 `bookmarklist` 格式的缓存文件
+- 按时间反向加权：越老的划线越可能被选中（激活遗忘内容）
+- 推送历史存在 `~/.agents/skills/taxue-weread/state/review_history.jsonl`
+- 全部划线推送完一轮后自动归档历史，开始新一轮
+
+### 定时推送
+
+```bash
+# cron（每天早 8 点）
+0 8 * * * python3 ~/.agents/skills/taxue-weread/scripts/weread.py daily-review --notify
+```
+
+---
+
+*taxue-weread v1.7.0 · 原子操作层 · 直接、稳定、不绕弯*
